@@ -10,12 +10,10 @@
 
 #import <Cocoa/Cocoa.h>
 
-#import "Platform.h"
 #import "Scintilla.h"
 #import "SciLexer.h"
 
 #import "InfoBarCommunicator.h"
-#import "ScintillaCocoa.h"
 
 @class ScintillaView;
 
@@ -37,11 +35,15 @@ extern NSString *SCIUpdateUINotification;
   
   // Caret position when a drag operation started.
   int mLastPosition;
+
+  // Set when we are in composition mode, group undo, etc.
+  BOOL mComposing;
 }
 
 - (void) dealloc;
 - (void) removeMarkedText;
-- (void) setCursor: (Scintilla::Window::Cursor) cursor;
+// Type changed, make sure this header can be used by plain Objective-C
+- (void) setCursor: (/*Scintilla::Window::Cursor*/ int) cursor;
 
 @property (retain) ScintillaView* owner;
 @end
@@ -51,7 +53,8 @@ extern NSString *SCIUpdateUINotification;
 @private
   // The back end is kind of a controller and model in one.
   // It uses the content view for display.
-  Scintilla::ScintillaCocoa* mBackend;
+  // Type changed, make sure this header can be used by plain Objective-C
+  void* mBackend;
   
   // The object (eg NSDocument) that controls the ScintillaView.
   NSObject* mOwner;
@@ -129,6 +132,7 @@ extern NSString *SCIUpdateUINotification;
                      scrollTo: (BOOL) scrollTo
                          wrap: (BOOL) wrap;
 
-@property Scintilla::ScintillaCocoa* backend;
+// Type changed, make sure this header can be used by plain Objective-C
+@property void* backend;
 @property (retain) NSObject* owner;
 @end

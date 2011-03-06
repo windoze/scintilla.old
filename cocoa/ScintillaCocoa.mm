@@ -18,7 +18,9 @@
 
 #import <Carbon/Carbon.h> // Temporary
 
+#import "Platform.h"
 #include "ScintillaView.h"
+#import "ScintillaCocoa.h"
 #include "PlatCocoa.h"
 
 using namespace Scintilla;
@@ -353,7 +355,7 @@ sptr_t ScintillaCocoa::DirectFunction(ScintillaCocoa *sciThis, unsigned int iMes
 sptr_t scintilla_send_message(void* sci, unsigned int iMessage, uptr_t wParam, sptr_t lParam)
 {
   ScintillaView *control = reinterpret_cast<ScintillaView*>(sci);
-  ScintillaCocoa* scintilla = [control backend];
+  ScintillaCocoa* scintilla = static_cast<ScintillaCocoa *>([control backend]);
   return scintilla->WndProc(iMessage, wParam, lParam);
 }
 

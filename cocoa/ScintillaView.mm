@@ -8,7 +8,10 @@
  * This file is dual licensed under LGPL v2.1 and the Scintilla license (http://www.scintilla.org/License.txt).
  */
 
+#import "Platform.h"
 #import "ScintillaView.h"
+#import "ScintillaCocoa.h"
+#import "Scintilla.h"
 
 using namespace Scintilla;
 
@@ -18,6 +21,8 @@ static NSCursor* waitCursor;
 
 // The scintilla indicator used for keyboard input.
 #define INPUT_INDICATOR INDIC_MAX - 1
+// A shortcut to call backend
+#define BACKEND(x) static_cast<ScintillaCocoa *>(x)
 
 NSString *SCIUpdateUINotification = @"SCIUpdateUI";
 
@@ -38,6 +43,7 @@ NSString *SCIUpdateUINotification = @"SCIUpdateUI";
     mCurrentTrackingRect = 0;
     mMarkedTextRange = NSMakeRange(NSNotFound, 0);
     
+    mComposing=FALSE;
     [self registerForDraggedTypes: [NSArray arrayWithObjects:
                                    NSStringPboardType, ScintillaRecPboardType, NSFilenamesPboardType, nil]];
   }
@@ -61,7 +67,7 @@ NSString *SCIUpdateUINotification = @"SCIUpdateUI";
                                          owner: self
                                       userData: nil
                                   assumeInside: YES];
-  mOwner.backend->Resize();
+  BACKEND(mOwner.backend)->Resize();
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -69,7 +75,7 @@ NSString *SCIUpdateUINotification = @"SCIUpdateUI";
 /**
  * Called by the backend if a new cursor must be set for the view.
  */
-- (void) setCursor: (Window::Cursor) cursor
+- (void) setCursor: (/*Window::Cursor*/int) cursor
 {
   [mCurrentCursor autorelease];
   switch (cursor)
@@ -128,7 +134,7 @@ NSString *SCIUpdateUINotification = @"SCIUpdateUI";
 {
   CGContextRef context = (CGContextRef) [[NSGraphicsContext currentContext] graphicsPort];
   
-  mOwner.backend->Draw(rect, context);
+    BACKEND(mOwner.backend)->Draw(rect, context);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -179,7 +185,7 @@ NSString *SCIUpdateUINotification = @"SCIUpdateUI";
  */
 - (NSMenu*) menuForEvent: (NSEvent*) theEvent
 {
-  return mOwner.backend->CreateContextMenu(theEvent);
+  return BACKEND(mOwner.backend)->CreateContextMenu(theEvent);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -218,7 +224,27 @@ NSString *SCIUpdateUINotification = @"SCIUpdateUI";
 
 - (NSRect) firstRectForCharacterRange: (NSRange) range
 {
-  return NSZeroRect;
+    int line=[mOwner getGeneralProperty:SCI_LINEFROMPOSITION
+                              parameter:range.location];
+    int lineHeight=[mOwner getGeneralProperty:SCI_TEXTHEIGHT
+                                    parameter:line];
+    NSRect rect=NSZeroRect;
+    rect.origin.x=[mOwner getGeneralProperty:SCI_POINTXFROMPOSITION
+                                   parameter:0 extra:range.location];
+    rect.origin.y=[mOwner getGeneralProperty:SCI_POINTYFROMPOSITION
+                                   parameter:0 extra:range.location];
+    rect.origin.y+=lineHeight;
+    
+    rect = [self convertRectToBase:rect];
+    rect.origin = [[self window] convertBaseToScreen:rect.origin];
+    
+    // TODO: Handle multi-line input
+    rect.size.height=lineHeight;
+    
+    // TODO: Calculate rectangle width
+    rect.size.width=0;
+    
+    return rect;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -238,7 +264,11 @@ NSString *SCIUpdateUINotification = @"SCIUpdateUI";
 {
   // Remove any previously marked text first.
   [self removeMarkedText];
-  mOwner.backend->InsertText((NSString*) aString);
+  BACKEND(mOwner.backend)->InsertText((NSString*) aString);
+  if (mComposing) {
+    mComposing=FALSE;
+    [ScintillaView directCall:mOwner message:SCI_ENDUNDOACTION wParam:0 lParam:0];
+  }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -271,7 +301,20 @@ NSString *SCIUpdateUINotification = @"SCIUpdateUI";
 {
   // Since we did not return any valid attribute for marked text (see validAttributesForMarkedText)
   // we can safely assume the passed in text is an NSString instance.
+  // Chen: No, we cannot, this is not the case under Snow Leopard
+  if ([aString isKindOfClass :[NSAttributedString class]]) {
+    aString = [aString string];
+  }
   NSString* newText = (NSString*) aString;
+
+  // Make whole IME input as one action to be undone
+  if (!mComposing) {
+    if ([newText length]>0) {
+      mComposing=TRUE;
+      [ScintillaView directCall:mOwner message:SCI_BEGINUNDOACTION wParam:0 lParam:0];
+    }
+  }
+    
   int currentPosition = [mOwner getGeneralProperty: SCI_GETCURRENTPOS parameter: 0];
 
   // Replace marked text if there is one.
@@ -289,12 +332,11 @@ NSString *SCIUpdateUINotification = @"SCIUpdateUI";
 
   // Note: Scintilla internally works almost always with bytes instead chars, so we need to take
   //       this into account when determining selection ranges and such.
-  std::string raw_text = [newText UTF8String];
-  mOwner.backend->InsertText(newText);
+  BACKEND(mOwner.backend)->InsertText(newText);
 
   mMarkedTextRange.location = currentPosition;
-  mMarkedTextRange.length = raw_text.size();
-    
+  mMarkedTextRange.length = [newText lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+
   // Mark the just inserted text. Keep the marked range for later reset.
   [mOwner setGeneralProperty: SCI_SETINDICATORCURRENT parameter: INPUT_INDICATOR value: 0];
   [mOwner setGeneralProperty: SCI_INDICATORFILLRANGE
@@ -310,6 +352,15 @@ NSString *SCIUpdateUINotification = @"SCIUpdateUI";
     [mOwner setGeneralProperty: SCI_SETSELECTIONEND 
                      parameter: currentPosition + range.location + range.length
                          value: 0];
+  }
+  if (mComposing) {
+    if ([newText length]==0) {
+      // User discards all composing inputs.
+      mComposing=FALSE;
+      [ScintillaView directCall:mOwner message:SCI_ENDUNDOACTION wParam:0 lParam:0];
+      // TODO: Here we have an empty action that can be undone with no effect
+      // How do we delete this action?
+    }
   }
 }
 
@@ -343,7 +394,7 @@ NSString *SCIUpdateUINotification = @"SCIUpdateUI";
     [mOwner setGeneralProperty: SCI_SETSELECTIONEND 
                      parameter: mMarkedTextRange.location + mMarkedTextRange.length
                          value: 0];
-    mOwner.backend->InsertText(@"");
+    BACKEND(mOwner.backend)->InsertText(@"");
     mMarkedTextRange = NSMakeRange(NSNotFound, 0);
   }
 }
@@ -366,7 +417,10 @@ NSString *SCIUpdateUINotification = @"SCIUpdateUI";
  */
 - (void) keyDown: (NSEvent *) theEvent
 {
-  mOwner.backend->KeyboardInput(theEvent);
+  // Only handle key input when we're not using IME
+  if (![self hasMarkedText]) {
+    BACKEND(mOwner.backend)->KeyboardInput(theEvent);
+  }
   NSArray* events = [NSArray arrayWithObject: theEvent];
   [self interpretKeyEvents: events];
 }
@@ -375,49 +429,49 @@ NSString *SCIUpdateUINotification = @"SCIUpdateUI";
 
 - (void) mouseDown: (NSEvent *) theEvent  
 {
-  mOwner.backend->MouseDown(theEvent);
+  BACKEND(mOwner.backend)->MouseDown(theEvent);
 }
 
 //--------------------------------------------------------------------------------------------------
 
 - (void) mouseDragged: (NSEvent *) theEvent
 {
-  mOwner.backend->MouseMove(theEvent);
+  BACKEND(mOwner.backend)->MouseMove(theEvent);
 }
 
 //--------------------------------------------------------------------------------------------------
 
 - (void) mouseUp: (NSEvent *) theEvent
 {
-  mOwner.backend->MouseUp(theEvent);
+  BACKEND(mOwner.backend)->MouseUp(theEvent);
 }
 
 //--------------------------------------------------------------------------------------------------
 
 - (void) mouseMoved: (NSEvent *) theEvent
 {
-  mOwner.backend->MouseMove(theEvent);
+  BACKEND(mOwner.backend)->MouseMove(theEvent);
 }
 
 //--------------------------------------------------------------------------------------------------
 
 - (void) mouseEntered: (NSEvent *) theEvent
 {
-  mOwner.backend->MouseEntered(theEvent);
+  BACKEND(mOwner.backend)->MouseEntered(theEvent);
 }
 
 //--------------------------------------------------------------------------------------------------
 
 - (void) mouseExited: (NSEvent *) theEvent
 {
-  mOwner.backend->MouseExited(theEvent);
+  BACKEND(mOwner.backend)->MouseExited(theEvent);
 }
 
 //--------------------------------------------------------------------------------------------------
 
 - (void) scrollWheel: (NSEvent *) theEvent
 {
-  mOwner.backend->MouseWheel(theEvent);
+  BACKEND(mOwner.backend)->MouseWheel(theEvent);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -427,7 +481,7 @@ NSString *SCIUpdateUINotification = @"SCIUpdateUI";
  */
 - (BOOL) becomeFirstResponder
 {
-  mOwner.backend->WndProc(SCI_SETFOCUS, 1, 0);
+  BACKEND(mOwner.backend)->WndProc(SCI_SETFOCUS, 1, 0);
   return YES;
 }
 
@@ -438,7 +492,7 @@ NSString *SCIUpdateUINotification = @"SCIUpdateUI";
  */
 - (BOOL) resignFirstResponder
 {
-  mOwner.backend->WndProc(SCI_SETFOCUS, 0, 0);
+  BACKEND(mOwner.backend)->WndProc(SCI_SETFOCUS, 0, 0);
   return YES;
 }
 
@@ -449,7 +503,7 @@ NSString *SCIUpdateUINotification = @"SCIUpdateUI";
  */
 - (NSDragOperation) draggingEntered: (id <NSDraggingInfo>) sender
 {
-  return mOwner.backend->DraggingEntered(sender);
+  return BACKEND(mOwner.backend)->DraggingEntered(sender);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -459,7 +513,7 @@ NSString *SCIUpdateUINotification = @"SCIUpdateUI";
  */
 - (NSDragOperation) draggingUpdated: (id <NSDraggingInfo>) sender
 {
-  return mOwner.backend->DraggingUpdated(sender);
+  return BACKEND(mOwner.backend)->DraggingUpdated(sender);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -469,7 +523,7 @@ NSString *SCIUpdateUINotification = @"SCIUpdateUI";
  */
 - (void) draggingExited: (id <NSDraggingInfo>) sender
 {
-  mOwner.backend->DraggingExited(sender);
+  BACKEND(mOwner.backend)->DraggingExited(sender);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -483,7 +537,7 @@ NSString *SCIUpdateUINotification = @"SCIUpdateUI";
 
 - (BOOL) performDragOperation: (id <NSDraggingInfo>) sender
 {
-  return mOwner.backend->PerformDragOperation(sender);  
+  return BACKEND(mOwner.backend)->PerformDragOperation(sender);  
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -504,7 +558,7 @@ NSString *SCIUpdateUINotification = @"SCIUpdateUI";
 - (void) concludeDragOperation: (id <NSDraggingInfo>) sender
 {
   // Clean up is the same as if we are no longer the drag target.
-  mOwner.backend->DraggingExited(sender);
+  BACKEND(mOwner.backend)->DraggingExited(sender);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -513,37 +567,37 @@ NSString *SCIUpdateUINotification = @"SCIUpdateUI";
 
 - (void) selectAll: (id) sender
 {
-  mOwner.backend->SelectAll();
+  BACKEND(mOwner.backend)->SelectAll();
 }
 
 - (void) deleteBackward: (id) sender
 {
-  mOwner.backend->DeleteBackward();
+  BACKEND(mOwner.backend)->DeleteBackward();
 }
 
 - (void) cut: (id) sender
 {
-  mOwner.backend->Cut();
+  BACKEND(mOwner.backend)->Cut();
 }
 
 - (void) copy: (id) sender
 {
-  mOwner.backend->Copy();
+  BACKEND(mOwner.backend)->Copy();
 }
 
 - (void) paste: (id) sender
 {
-  mOwner.backend->Paste();
+  BACKEND(mOwner.backend)->Paste();
 }
 
 - (void) undo: (id) sender
 {
-  mOwner.backend->Undo();
+  BACKEND(mOwner.backend)->Undo();
 }
 
 - (void) redo: (id) sender
 {
-  mOwner.backend->Redo();
+  BACKEND(mOwner.backend)->Redo();
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -685,7 +739,7 @@ static void notification(intptr_t windowid, unsigned int iMessage, uintptr_t wPa
         {
           // Triggered whenever changes in the UI state need to be reflected.
           // These can be: caret changes, selection changes etc.
-          NSPoint caretPosition = editor->mBackend->GetCaretPosition();
+          NSPoint caretPosition = BACKEND(editor->mBackend)->GetCaretPosition();
           [editor->mInfoBar notify: IBNCaretChanged message: nil location: caretPosition value: 0];
           [editor sendNotification: SCIUpdateUINotification];
           break;
@@ -745,7 +799,7 @@ static void notification(intptr_t windowid, unsigned int iMessage, uintptr_t wPa
     
     // Establish a connection from the back end to this container so we can handle situations
     // which require our attention.
-    mBackend->RegisterNotifyCallback(nil, notification);
+    BACKEND(mBackend)->RegisterNotifyCallback(nil, notification);
     
     // Setup a special indicator used in the editor to provide visual feedback for 
     // input composition, depending on language, keyboard etc.
@@ -762,7 +816,7 @@ static void notification(intptr_t windowid, unsigned int iMessage, uintptr_t wPa
 - (void) dealloc
 {
   [mInfoBar release];
-  delete mBackend;
+  delete BACKEND(mBackend);
   [super dealloc];
 }
 
@@ -985,7 +1039,7 @@ static void notification(intptr_t windowid, unsigned int iMessage, uintptr_t wPa
 - (void) scrollerAction: (id) sender
 {
   float position = [sender floatValue];
-  mBackend->DoScroll(position, [sender hitPart], sender == mHorizontalScroller);
+  BACKEND(mBackend)->DoScroll(position, [sender hitPart], sender == mHorizontalScroller);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1010,14 +1064,14 @@ static void notification(intptr_t windowid, unsigned int iMessage, uintptr_t wPa
   NSString *result = @"";
   
   char *buffer(0);
-  const int length = mBackend->WndProc(SCI_GETSELTEXT, 0, 0);
+  const int length = BACKEND(mBackend)->WndProc(SCI_GETSELTEXT, 0, 0);
   if (length > 0)
   {
     buffer = new char[length + 1];
     try
     {
-      mBackend->WndProc(SCI_GETSELTEXT, length + 1, (sptr_t) buffer);
-      mBackend->WndProc(SCI_SETSAVEPOINT, 0, 0);
+      BACKEND(mBackend)->WndProc(SCI_GETSELTEXT, length + 1, (sptr_t) buffer);
+      BACKEND(mBackend)->WndProc(SCI_SETSAVEPOINT, 0, 0);
       
       result = [NSString stringWithUTF8String: buffer];
       delete[] buffer;
@@ -1043,14 +1097,14 @@ static void notification(intptr_t windowid, unsigned int iMessage, uintptr_t wPa
   NSString *result = @"";
   
   char *buffer(0);
-  const int length = mBackend->WndProc(SCI_GETLENGTH, 0, 0);
+  const int length = BACKEND(mBackend)->WndProc(SCI_GETLENGTH, 0, 0);
   if (length > 0)
   {
     buffer = new char[length + 1];
     try
     {
-      mBackend->WndProc(SCI_GETTEXT, length + 1, (sptr_t) buffer);
-      mBackend->WndProc(SCI_SETSAVEPOINT, 0, 0);
+      BACKEND(mBackend)->WndProc(SCI_GETTEXT, length + 1, (sptr_t) buffer);
+      BACKEND(mBackend)->WndProc(SCI_SETSAVEPOINT, 0, 0);
       
       result = [NSString stringWithUTF8String: buffer];
       delete[] buffer;
@@ -1073,7 +1127,7 @@ static void notification(intptr_t windowid, unsigned int iMessage, uintptr_t wPa
 - (void) setString: (NSString*) aString
 {
   const char* text = [aString UTF8String];
-  mBackend->WndProc(SCI_SETTEXT, 0, (long) text);
+  BACKEND(mBackend)->WndProc(SCI_SETTEXT, 0, (long) text);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1081,21 +1135,21 @@ static void notification(intptr_t windowid, unsigned int iMessage, uintptr_t wPa
 - (void) insertString: (NSString*) aString atOffset: (int)offset
 {
   const char* text = [aString UTF8String];
-  mBackend->WndProc(SCI_ADDTEXT, offset, (long) text);
+  BACKEND(mBackend)->WndProc(SCI_ADDTEXT, offset, (long) text);
 }
 
 //--------------------------------------------------------------------------------------------------
 
 - (void) setEditable: (BOOL) editable
 {
-  mBackend->WndProc(SCI_SETREADONLY, editable ? 0 : 1, 0);
+  BACKEND(mBackend)->WndProc(SCI_SETREADONLY, editable ? 0 : 1, 0);
 }
 
 //--------------------------------------------------------------------------------------------------
 
 - (BOOL) isEditable
 {
-  return mBackend->WndProc(SCI_GETREADONLY, 0, 0) != 0;
+  return BACKEND(mBackend)->WndProc(SCI_GETREADONLY, 0, 0) != 0;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1115,7 +1169,7 @@ static void notification(intptr_t windowid, unsigned int iMessage, uintptr_t wPa
 + (sptr_t) directCall: (ScintillaView*) sender message: (unsigned int) message wParam: (uptr_t) wParam
                lParam: (sptr_t) lParam
 {
-  return ScintillaCocoa::DirectFunction(sender->mBackend, message, wParam, lParam);
+  return ScintillaCocoa::DirectFunction(BACKEND(sender->mBackend), message, wParam, lParam);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1129,7 +1183,7 @@ static void notification(intptr_t windowid, unsigned int iMessage, uintptr_t wPa
  */
 - (void) setGeneralProperty: (int) property parameter: (long) parameter value: (long) value
 {
-  mBackend->WndProc(property, parameter, value);
+  BACKEND(mBackend)->WndProc(property, parameter, value);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1144,7 +1198,7 @@ static void notification(intptr_t windowid, unsigned int iMessage, uintptr_t wPa
  */
 - (long) getGeneralProperty: (int) property parameter: (long) parameter extra: (long) extra
 {
-  return mBackend->WndProc(property, parameter, extra);
+  return BACKEND(mBackend)->WndProc(property, parameter, extra);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1154,7 +1208,7 @@ static void notification(intptr_t windowid, unsigned int iMessage, uintptr_t wPa
  */
 - (long) getGeneralProperty: (int) property parameter: (long) parameter
 {
-  return mBackend->WndProc(property, parameter, 0);
+  return BACKEND(mBackend)->WndProc(property, parameter, 0);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1164,7 +1218,7 @@ static void notification(intptr_t windowid, unsigned int iMessage, uintptr_t wPa
  */
 - (long) getGeneralProperty: (int) property
 {
-  return mBackend->WndProc(property, 0, 0);
+  return BACKEND(mBackend)->WndProc(property, 0, 0);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1174,7 +1228,7 @@ static void notification(intptr_t windowid, unsigned int iMessage, uintptr_t wPa
  */
 - (long) getGeneralProperty: (int) property ref: (const void*) ref
 {
-  return mBackend->WndProc(property, 0, (sptr_t) ref);  
+  return BACKEND(mBackend)->WndProc(property, 0, (sptr_t) ref);  
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1191,7 +1245,7 @@ static void notification(intptr_t windowid, unsigned int iMessage, uintptr_t wPa
   long blue = [value blueComponent] * 255;
   
   long color = (blue << 16) + (green << 8) + red;
-  mBackend->WndProc(property, parameter, color);
+  BACKEND(mBackend)->WndProc(property, parameter, color);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1236,7 +1290,7 @@ static void notification(intptr_t windowid, unsigned int iMessage, uintptr_t wPa
     [[NSScanner scannerWithString: [NSString stringWithUTF8String: value]] scanHexInt: &rawBlue];
 
     long color = (rawBlue << 16) + (rawGreen << 8) + rawRed;
-    mBackend->WndProc(property, parameter, color);
+    BACKEND(mBackend)->WndProc(property, parameter, color);
   }
 }
 
@@ -1247,7 +1301,7 @@ static void notification(intptr_t windowid, unsigned int iMessage, uintptr_t wPa
  */
 - (NSColor*) getColorProperty: (int) property parameter: (long) parameter
 {
-  int color = mBackend->WndProc(property, parameter, 0);
+  int color = BACKEND(mBackend)->WndProc(property, parameter, 0);
   float red = (color & 0xFF) / 255.0;
   float green = ((color >> 8) & 0xFF) / 255.0;
   float blue = ((color >> 16) & 0xFF) / 255.0;
@@ -1262,7 +1316,7 @@ static void notification(intptr_t windowid, unsigned int iMessage, uintptr_t wPa
  */
 - (void) setReferenceProperty: (int) property parameter: (long) parameter value: (const void*) value
 {
-  mBackend->WndProc(property, parameter, (sptr_t) value);
+  BACKEND(mBackend)->WndProc(property, parameter, (sptr_t) value);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1272,7 +1326,7 @@ static void notification(intptr_t windowid, unsigned int iMessage, uintptr_t wPa
  */
 - (const void*) getReferenceProperty: (int) property parameter: (long) parameter
 {
-  return (const void*) mBackend->WndProc(property, parameter, 0);
+  return (const void*) BACKEND(mBackend)->WndProc(property, parameter, 0);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1283,7 +1337,7 @@ static void notification(intptr_t windowid, unsigned int iMessage, uintptr_t wPa
 - (void) setStringProperty: (int) property parameter: (long) parameter value: (NSString*) value
 {
   const char* rawValue = [value UTF8String];
-  mBackend->WndProc(property, parameter, (sptr_t) rawValue);
+  BACKEND(mBackend)->WndProc(property, parameter, (sptr_t) rawValue);
 }
 
 
@@ -1294,7 +1348,7 @@ static void notification(intptr_t windowid, unsigned int iMessage, uintptr_t wPa
  */
 - (NSString*) getStringProperty: (int) property parameter: (long) parameter
 {
-  const char* rawValue = (const char*) mBackend->WndProc(property, parameter, 0);
+  const char* rawValue = (const char*) BACKEND(mBackend)->WndProc(property, parameter, 0);
   return [NSString stringWithUTF8String: rawValue];
 }
 
@@ -1307,7 +1361,7 @@ static void notification(intptr_t windowid, unsigned int iMessage, uintptr_t wPa
 {
   const char* rawName = [name UTF8String];
   const char* rawValue = [value UTF8String];
-  mBackend->WndProc(SCI_SETPROPERTY, (sptr_t) rawName, (sptr_t) rawValue);
+  BACKEND(mBackend)->WndProc(SCI_SETPROPERTY, (sptr_t) rawName, (sptr_t) rawValue);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1318,7 +1372,7 @@ static void notification(intptr_t windowid, unsigned int iMessage, uintptr_t wPa
 - (NSString*) getLexerProperty: (NSString*) name
 {
   const char* rawName = [name UTF8String];
-  const char* result = (const char*) mBackend->WndProc(SCI_SETPROPERTY, (sptr_t) rawName, 0);
+  const char* result = (const char*) BACKEND(mBackend)->WndProc(SCI_SETPROPERTY, (sptr_t) rawName, 0);
   return [NSString stringWithUTF8String: result];
 }
 
@@ -1404,13 +1458,13 @@ static void notification(intptr_t windowid, unsigned int iMessage, uintptr_t wPa
   ttf.chrg.cpMin = currentPosition;
   ttf.chrg.cpMax = length;
   ttf.lpstrText = (char*) [searchText UTF8String];
-  int position = mBackend->WndProc(SCI_FINDTEXT, searchFlags, (sptr_t) &ttf);
+  int position = BACKEND(mBackend)->WndProc(SCI_FINDTEXT, searchFlags, (sptr_t) &ttf);
   
   if (position < 0 && wrap)
   {
     ttf.chrg.cpMin = 0;
     ttf.chrg.cpMax = currentPosition;
-    position = mBackend->WndProc(SCI_FINDTEXT, searchFlags, (sptr_t) &ttf);
+    position = BACKEND(mBackend)->WndProc(SCI_FINDTEXT, searchFlags, (sptr_t) &ttf);
   }
   
   if (position >= 0)
