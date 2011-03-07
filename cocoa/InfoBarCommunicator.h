@@ -8,12 +8,12 @@
  * This file is dual licensed under LGPL v2.1 and the Scintilla license (http://www.scintilla.org/License.txt).
  */
 
-enum IBDisplay {
+typedef enum {
   IBShowZoom          = 0x01,
   IBShowCaretPosition = 0x02,
   IBShowStatusText    = 0x04,
   IBShowAll           = 0xFF
-};
+} IBDisplay;
 
 /**
  * The info bar communicator protocol is used for communication between ScintillaView and its
@@ -21,11 +21,11 @@ enum IBDisplay {
  * ScintillaView implementation. The protocol is used two-way.
  */
 
-enum NotificationType {
+typedef enum {
   IBNZoomChanged,    // The user selected another zoom value.
   IBNCaretChanged,   // The caret in the editor changed.
   IBNStatusChanged,  // The application set a new status message.
-};
+} NotificationType;
 
 @protocol InfoBarCommunicator
 - (void) notify: (NotificationType) type message: (NSString*) message location: (NSPoint) location

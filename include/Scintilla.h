@@ -901,10 +901,6 @@ typedef sptr_t (*SciFnDirect)(sptr_t ptr, unsigned int iMessage, uptr_t wParam, 
  * CHARRANGE, TEXTRANGE, FINDTEXTEX, FORMATRANGE, and NMHDR structs.
  * So older code that treats Scintilla as a RichEdit will work. */
 
-#ifdef SCI_NAMESPACE
-namespace Scintilla {
-#endif
-
 struct Sci_CharacterRange {
 	long cpMin;
 	long cpMax;
@@ -981,10 +977,6 @@ struct SCNotification {
 	int annotationLinesAdded;	/* SC_MOD_CHANGEANNOTATION */
 	int updated;	/* SCN_UPDATEUI */
 };
-
-#ifdef SCI_NAMESPACE
-}
-#endif
 
 #ifdef INCLUDE_DEPRECATED_FEATURES
 
